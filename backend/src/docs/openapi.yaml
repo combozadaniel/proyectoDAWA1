@@ -1,0 +1,797 @@
+openapi: 3.0.3
+info:
+  title: ServiGest Ecuador API
+  version: 1.0.0
+  description: |
+    API REST para la gestión de solicitudes de servicios técnicos, asignación de técnicos,
+    seguimiento operativo y dashboard de indicadores.
+
+    **Autenticación:** JWT Bearer. Obtenga el token con `POST /api/auth/login` y envíelo en
+    el encabezado `Authorization: Bearer <token>`.
+
+    **Roles:** `ADMIN`, `COORDINADOR`, `TECNICO`, `CLIENTE`. El backend verifica la autorización
+    en cada operación protegida.
+
+    **Formato de error (todas las respuestas 4xx/5xx):**
+    ```json
+    { "error": { "code": "REGLA_NEGOCIO", "message": "Texto legible", "details": [] } }
+    ```
+    Códigos: `SOLICITUD_INVALIDA` (400), `NO_AUTENTICADO` (401), `PROHIBIDO` (403),
+    `NO_ENCONTRADO` (404), `CONFLICTO` (409), `VALIDACION` / `REGLA_NEGOCIO` (422),
+    `DEMASIADOS_INTENTOS` (429), `ERROR_INTERNO` (500).
+
+    **Tiempo real:** Socket.IO en el mismo host. Conectar con `auth: { token }`.
+    Eventos: `notificacion` y `solicitud:actualizada`.
+
+    Usuarios de prueba (contraseña `Servigest2026`): admin@servigest.ec, coordinador@servigest.ec,
+    tecnico@servigest.ec, cliente@servigest.ec
+servers:
+  - url: /
+security:
+  - bearerAuth: []
+tags:
+  - name: Auth
+  - name: Solicitudes
+  - name: Dashboard
+  - name: Notificaciones
+  - name: Clientes
+  - name: Técnicos
+  - name: Catálogos
+  - name: Usuarios
+  - name: Auditoría
+
+paths:
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Iniciar sesión
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email, example: coordinador@servigest.ec }
+                password: { type: string, example: Servigest2026 }
+      responses:
+        '200':
+          description: Sesión iniciada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string, example: eyJhbGciOiJIUzI1NiIs... }
+                  usuario: { $ref: '#/components/schemas/Perfil' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+        '403': { description: Usuario inactivo, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '422': { $ref: '#/components/responses/Validacion' }
+        '429': { description: Demasiados intentos }
+  /api/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Cerrar sesión (revoca el token actual)
+      responses:
+        '204': { description: Sesión cerrada }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+  /api/auth/me:
+    get:
+      tags: [Auth]
+      summary: Perfil del usuario autenticado
+      responses:
+        '200': { description: Perfil, content: { application/json: { schema: { $ref: '#/components/schemas/Perfil' } } } }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+  /api/auth/me/password:
+    patch:
+      tags: [Auth]
+      summary: Cambiar la contraseña propia
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [actual, nueva]
+              properties:
+                actual: { type: string }
+                nueva: { type: string, minLength: 8, description: 'Al menos una letra y un número' }
+      responses:
+        '204': { description: Contraseña actualizada }
+        '422': { $ref: '#/components/responses/Validacion' }
+  /api/auth/olvide-password:
+    post:
+      tags: [Auth]
+      summary: Solicitar restablecimiento de contraseña
+      description: |
+        Genera un token de un solo uso (vigencia configurable en `HORAS_EXPIRACION_RESET`).
+        Responde igual exista o no el correo. Fuera de producción devuelve `tokenDesarrollo`
+        porque el proyecto no integra servidor de correo.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [email], properties: { email: { type: string, format: email } } }
+      responses:
+        '202':
+          description: Solicitud aceptada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+                  tokenDesarrollo: { type: string, description: Solo en desarrollo/pruebas }
+  /api/auth/restablecer-password:
+    post:
+      tags: [Auth]
+      summary: Restablecer contraseña con token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, password]
+              properties:
+                token: { type: string, minLength: 64, maxLength: 64 }
+                password: { type: string, minLength: 8 }
+      responses:
+        '204': { description: Contraseña restablecida }
+        '422': { description: Token inválido/expirado o contraseña débil, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /api/solicitudes:
+    get:
+      tags: [Solicitudes]
+      summary: Listado paginado y filtrado
+      description: |
+        Alcance por rol: CLIENTE ve solo las de su empresa; TECNICO solo las asignadas a él;
+        ADMIN y COORDINADOR ven todas. Cada elemento incluye `estado_plazo` calculado en el backend.
+      parameters:
+        - { $ref: '#/components/parameters/page' }
+        - { $ref: '#/components/parameters/limit' }
+        - { name: estado, in: query, schema: { type: string }, description: 'Lista separada por comas. Ej. REGISTRADA,APROBADA' }
+        - { name: prioridad, in: query, schema: { type: string }, description: 'BAJA,MEDIA,ALTA,CRITICA (separadas por comas)' }
+        - { name: categoria_id, in: query, schema: { type: integer } }
+        - { name: sede_id, in: query, schema: { type: integer } }
+        - { name: cliente_id, in: query, schema: { type: integer } }
+        - { name: tecnico_id, in: query, schema: { type: integer } }
+        - { name: desde, in: query, schema: { type: string, format: date } }
+        - { name: hasta, in: query, schema: { type: string, format: date } }
+        - { name: q, in: query, schema: { type: string }, description: Busca en código y título }
+        - { name: vencimiento, in: query, schema: { type: string, enum: [vencida, por_vencer] } }
+        - { name: orden, in: query, schema: { type: string, enum: [recientes, antiguas, vencimiento, prioridad] } }
+      responses:
+        '200':
+          description: Página de solicitudes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Solicitud' } }
+                  meta: { $ref: '#/components/schemas/Meta' }
+        '401': { $ref: '#/components/responses/NoAutenticado' }
+        '422': { $ref: '#/components/responses/Validacion' }
+    post:
+      tags: [Solicitudes]
+      summary: Registrar solicitud
+      description: |
+        Roles: CLIENTE (para su propia empresa), COORDINADOR y ADMIN (deben indicar `cliente_id`).
+        Se calcula `fecha_limite` = registro + horas de plazo de la prioridad. Acepta JSON o
+        `multipart/form-data` con hasta 5 archivos en el campo `adjuntos` (JPG, PNG, PDF, TXT; máx. 5 MB).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SolicitudNueva' }
+            example:
+              sede_id: 1
+              categoria_id: 6
+              prioridad_id: 3
+              titulo: Impresora no imprime
+              descripcion: La impresora del área contable muestra error de fusor desde esta mañana.
+              equipo_afectado: HP LaserJet M404
+          multipart/form-data:
+            schema:
+              allOf:
+                - { $ref: '#/components/schemas/SolicitudNueva' }
+                - type: object
+                  properties:
+                    adjuntos: { type: array, items: { type: string, format: binary } }
+      responses:
+        '201': { description: Creada, content: { application/json: { schema: { $ref: '#/components/schemas/Solicitud' } } } }
+        '403': { $ref: '#/components/responses/Prohibido' }
+        '422': { $ref: '#/components/responses/Validacion' }
+  /api/solicitudes/{id}:
+    get:
+      tags: [Solicitudes]
+      summary: Consultar detalle
+      description: Incluye adjuntos, asignaciones y las acciones permitidas al usuario actual. Si el usuario no tiene acceso responde 404.
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      responses:
+        '200': { description: Detalle, content: { application/json: { schema: { $ref: '#/components/schemas/SolicitudDetalle' } } } }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+  /api/solicitudes/{id}/estado:
+    patch:
+      tags: [Solicitudes]
+      summary: Cambiar estado con reglas
+      description: |
+        Transiciones permitidas (rol):
+        - REGISTRADA → APROBADA (ADMIN, COORDINADOR; puede ajustar `prioridad_id`)
+        - REGISTRADA/APROBADA → CANCELADA (ADMIN, COORDINADOR, CLIENTE dueño; requiere `comentario`)
+        - ASIGNADA → EN_PROCESO (TECNICO asignado, ADMIN, COORDINADOR)
+        - ASIGNADA/PENDIENTE_INFO → CANCELADA (ADMIN, COORDINADOR; requiere `comentario`)
+        - EN_PROCESO → PENDIENTE_INFO (requiere `comentario`)
+        - EN_PROCESO → RESUELTA (requiere `resolucion` ≥ 20 caracteres)
+        - PENDIENTE_INFO → EN_PROCESO
+        - RESUELTA → CERRADA (ADMIN, COORDINADOR, CLIENTE dueño)
+        - RESUELTA → EN_PROCESO (rechazo de la resolución; requiere `comentario`)
+
+        ASIGNADA solo se obtiene con `POST /asignaciones`; una solicitud CERRADA solo cambia con
+        `POST /reapertura`. Toda transición queda en el historial. Enviar `version` activa control
+        de concurrencia optimista (409 si otro usuario modificó la solicitud).
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [estado]
+              properties:
+                estado: { $ref: '#/components/schemas/Estado' }
+                comentario: { type: string }
+                resolucion: { type: string }
+                prioridad_id: { type: integer }
+                version: { type: integer }
+            examples:
+              resolver:
+                value: { estado: RESUELTA, resolucion: Se reemplazó el fusor y se realizaron pruebas de impresión correctas. }
+              pedirInfo:
+                value: { estado: PENDIENTE_INFO, comentario: Indique el horario de acceso a la sede. }
+      responses:
+        '200': { description: Solicitud actualizada, content: { application/json: { schema: { $ref: '#/components/schemas/Solicitud' } } } }
+        '403': { $ref: '#/components/responses/Prohibido' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+        '409': { $ref: '#/components/responses/Conflicto' }
+        '422': { $ref: '#/components/responses/ReglaNegocio' }
+  /api/solicitudes/{id}/asignaciones:
+    post:
+      tags: [Solicitudes]
+      summary: Asignar o reasignar técnico
+      description: |
+        Roles: ADMIN, COORDINADOR. La solicitud debe estar APROBADA (asignación) o
+        ASIGNADA/EN_PROCESO/PENDIENTE_INFO (reasignación con `motivo` obligatorio ≥ 10 caracteres).
+        El técnico debe estar activo, disponible, tener la especialidad de la categoría y carga menor a su máximo.
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tecnico_id]
+              properties:
+                tecnico_id: { type: integer, example: 1 }
+                motivo: { type: string, example: Reasignación por vacaciones del técnico. }
+      responses:
+        '201': { description: Asignada, content: { application/json: { schema: { $ref: '#/components/schemas/Solicitud' } } } }
+        '403': { $ref: '#/components/responses/Prohibido' }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+        '422':
+          description: El técnico no cumple las condiciones
+          content:
+            application/json:
+              example:
+                error:
+                  code: REGLA_NEGOCIO
+                  message: El técnico no cumple las condiciones de asignación
+                  details: { motivos: ['El técnico no tiene la especialidad requerida por la categoría'] }
+  /api/solicitudes/{id}/tecnicos-sugeridos:
+    get:
+      tags: [Solicitudes]
+      summary: Técnicos con la especialidad requerida, ordenados por carga, con elegibilidad
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      responses:
+        '200':
+          description: Candidatos
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: integer }
+                    nombre: { type: string }
+                    carga_actual: { type: integer }
+                    max_solicitudes_activas: { type: integer }
+                    disponible: { type: boolean }
+                    elegible: { type: boolean }
+                    motivos: { type: array, items: { type: string } }
+  /api/solicitudes/{id}/historial:
+    get:
+      tags: [Solicitudes]
+      summary: Consultar auditoría (historial inalterable)
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      responses:
+        '200': { description: Historial, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Historial' } } } } }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+  /api/solicitudes/{id}/reapertura:
+    post:
+      tags: [Solicitudes]
+      summary: Reapertura autorizada y auditada de una solicitud cerrada
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [motivo], properties: { motivo: { type: string, minLength: 10 } } }
+      responses:
+        '200': { description: Reabierta, content: { application/json: { schema: { $ref: '#/components/schemas/Solicitud' } } } }
+        '403': { $ref: '#/components/responses/Prohibido' }
+        '422': { $ref: '#/components/responses/ReglaNegocio' }
+  /api/solicitudes/{id}/comentarios:
+    post:
+      tags: [Solicitudes]
+      summary: Agregar comentario (respuesta a solicitud de información, notas)
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [comentario], properties: { comentario: { type: string } } }
+      responses:
+        '201': { description: Historial actualizado, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Historial' } } } } }
+  /api/solicitudes/{id}/adjuntos:
+    post:
+      tags: [Solicitudes]
+      summary: Subir adjuntos
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                adjuntos: { type: array, items: { type: string, format: binary } }
+      responses:
+        '201': { description: Adjuntos creados }
+        '400': { description: Archivo no permitido o muy grande }
+  /api/solicitudes/{id}/adjuntos/{adjuntoId}:
+    get:
+      tags: [Solicitudes]
+      summary: Descargar adjunto (requiere acceso a la solicitud)
+      parameters:
+        - { $ref: '#/components/parameters/id' }
+        - { name: adjuntoId, in: path, required: true, schema: { type: integer } }
+      responses:
+        '200': { description: Archivo }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+
+  /api/dashboard/indicadores:
+    get:
+      tags: [Dashboard]
+      summary: Obtener métricas
+      description: |
+        Indicadores calculados desde la base de datos. Por defecto, los últimos 30 días.
+        El alcance depende del rol (cliente: su empresa; técnico: sus solicitudes).
+      parameters:
+        - { name: desde, in: query, schema: { type: string, format: date } }
+        - { name: hasta, in: query, schema: { type: string, format: date } }
+        - { name: categoria_id, in: query, schema: { type: integer } }
+        - { name: prioridad_id, in: query, schema: { type: integer } }
+        - { name: cliente_id, in: query, schema: { type: integer } }
+        - { name: tecnico_id, in: query, schema: { type: integer } }
+      responses:
+        '200':
+          description: Indicadores
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Indicadores' }
+
+  /api/notificaciones:
+    get:
+      tags: [Notificaciones]
+      summary: Notificaciones del usuario autenticado
+      parameters:
+        - { $ref: '#/components/parameters/page' }
+        - { $ref: '#/components/parameters/limit' }
+        - { name: no_leidas, in: query, schema: { type: string, enum: ['true', 'false'] } }
+      responses:
+        '200':
+          description: Página de notificaciones
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Notificacion' } }
+                  meta: { $ref: '#/components/schemas/Meta' }
+                  noLeidas: { type: integer }
+  /api/notificaciones/{id}/leida:
+    patch:
+      tags: [Notificaciones]
+      summary: Marcar como leída
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      responses:
+        '204': { description: OK }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+  /api/notificaciones/leer-todas:
+    patch:
+      tags: [Notificaciones]
+      summary: Marcar todas como leídas
+      responses:
+        '200': { description: OK }
+
+  /api/clientes:
+    get:
+      tags: [Clientes]
+      summary: Listar clientes (ADMIN, COORDINADOR)
+      parameters:
+        - { $ref: '#/components/parameters/page' }
+        - { $ref: '#/components/parameters/limit' }
+        - { name: q, in: query, schema: { type: string } }
+        - { name: activo, in: query, schema: { type: string, enum: ['true', 'false'] } }
+      responses:
+        '200': { description: Página de clientes }
+    post:
+      tags: [Clientes]
+      summary: Crear cliente con sedes y cuenta de acceso opcional
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ClienteNuevo' }
+      responses:
+        '201': { description: Creado }
+        '409': { $ref: '#/components/responses/Conflicto' }
+        '422': { $ref: '#/components/responses/Validacion' }
+  /api/clientes/{id}:
+    parameters: [{ $ref: '#/components/parameters/id' }]
+    get:
+      tags: [Clientes]
+      summary: Detalle de cliente con sedes (un CLIENTE solo puede ver el suyo)
+      responses:
+        '200': { description: Cliente }
+        '404': { $ref: '#/components/responses/NoEncontrado' }
+    put:
+      tags: [Clientes]
+      summary: Actualizar cliente (desactivar también desactiva su cuenta)
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ClienteNuevo' }
+      responses:
+        '200': { description: Actualizado }
+    delete:
+      tags: [Clientes]
+      summary: Eliminar cliente (solo si no tiene solicitudes; ADMIN)
+      responses:
+        '204': { description: Eliminado }
+        '409': { $ref: '#/components/responses/Conflicto' }
+  /api/clientes/{id}/sedes:
+    parameters: [{ $ref: '#/components/parameters/id' }]
+    get:
+      tags: [Clientes]
+      summary: Sedes del cliente
+      responses: { '200': { description: Sedes } }
+    post:
+      tags: [Clientes]
+      summary: Crear sede
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, required: [nombre, direccion], properties: { nombre: { type: string }, direccion: { type: string } } }
+      responses: { '201': { description: Creada } }
+  /api/clientes/{id}/sedes/{sedeId}:
+    parameters:
+      - { $ref: '#/components/parameters/id' }
+      - { name: sedeId, in: path, required: true, schema: { type: integer } }
+    put:
+      tags: [Clientes]
+      summary: Actualizar sede
+      responses: { '200': { description: Actualizada } }
+    delete:
+      tags: [Clientes]
+      summary: Eliminar sede (sin solicitudes)
+      responses: { '204': { description: Eliminada }, '409': { $ref: '#/components/responses/Conflicto' } }
+
+  /api/tecnicos:
+    get:
+      tags: [Técnicos]
+      summary: Listar técnicos con carga actual (ADMIN, COORDINADOR)
+      parameters:
+        - { $ref: '#/components/parameters/page' }
+        - { $ref: '#/components/parameters/limit' }
+        - { name: q, in: query, schema: { type: string } }
+        - { name: especialidad_id, in: query, schema: { type: integer } }
+        - { name: disponible, in: query, schema: { type: string, enum: ['true', 'false'] } }
+      responses: { '200': { description: Página de técnicos } }
+    post:
+      tags: [Técnicos]
+      summary: Crear técnico y su usuario (ADMIN)
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TecnicoNuevo' }
+      responses:
+        '201': { description: Creado }
+        '409': { $ref: '#/components/responses/Conflicto' }
+  /api/tecnicos/{id}:
+    parameters: [{ $ref: '#/components/parameters/id' }]
+    get: { tags: [Técnicos], summary: Detalle de técnico, responses: { '200': { description: Técnico } } }
+    put: { tags: [Técnicos], summary: Actualizar técnico (especialidades, disponibilidad, carga máxima), responses: { '200': { description: Actualizado } } }
+    delete: { tags: [Técnicos], summary: Eliminar técnico sin asignaciones (ADMIN), responses: { '204': { description: Eliminado }, '409': { $ref: '#/components/responses/Conflicto' } } }
+  /api/tecnicos/me/disponibilidad:
+    patch:
+      tags: [Técnicos]
+      summary: El técnico autenticado cambia su disponibilidad
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, required: [disponible], properties: { disponible: { type: boolean } } }
+      responses: { '200': { description: Actualizado } }
+
+  /api/especialidades:
+    get: { tags: [Catálogos], summary: Listar especialidades, responses: { '200': { description: OK } } }
+    post:
+      tags: [Catálogos]
+      summary: Crear especialidad (ADMIN)
+      requestBody:
+        content: { application/json: { schema: { type: object, required: [nombre], properties: { nombre: { type: string }, descripcion: { type: string } } } } }
+      responses: { '201': { description: Creada }, '409': { $ref: '#/components/responses/Conflicto' } }
+  /api/especialidades/{id}:
+    parameters: [{ $ref: '#/components/parameters/id' }]
+    put: { tags: [Catálogos], summary: Actualizar especialidad, responses: { '200': { description: OK } } }
+    delete: { tags: [Catálogos], summary: Eliminar especialidad sin dependencias, responses: { '204': { description: OK }, '409': { $ref: '#/components/responses/Conflicto' } } }
+  /api/categorias:
+    get: { tags: [Catálogos], summary: Listar categorías de servicio, responses: { '200': { description: OK } } }
+    post:
+      tags: [Catálogos]
+      summary: Crear categoría (ADMIN)
+      requestBody:
+        content: { application/json: { schema: { type: object, required: [nombre, especialidad_id], properties: { nombre: { type: string }, descripcion: { type: string }, especialidad_id: { type: integer } } } } }
+      responses: { '201': { description: Creada } }
+  /api/categorias/{id}:
+    parameters: [{ $ref: '#/components/parameters/id' }]
+    put: { tags: [Catálogos], summary: Actualizar categoría, responses: { '200': { description: OK } } }
+    delete: { tags: [Catálogos], summary: Eliminar categoría sin solicitudes, responses: { '204': { description: OK }, '409': { $ref: '#/components/responses/Conflicto' } } }
+  /api/prioridades:
+    get: { tags: [Catálogos], summary: Prioridades y su plazo en horas, responses: { '200': { description: OK } } }
+  /api/prioridades/{id}:
+    put:
+      tags: [Catálogos]
+      summary: Actualizar plazo de una prioridad (ADMIN)
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      requestBody:
+        content: { application/json: { schema: { type: object, properties: { nombre: { type: string }, horas_plazo: { type: integer } } } } }
+      responses: { '200': { description: OK } }
+  /api/estados:
+    get: { tags: [Catálogos], summary: Estados del ciclo de vida, responses: { '200': { description: OK } } }
+  /api/parametros:
+    get: { tags: [Catálogos], summary: Parámetros operativos (ADMIN, COORDINADOR), responses: { '200': { description: OK } } }
+  /api/parametros/{clave}:
+    put:
+      tags: [Catálogos]
+      summary: Actualizar parámetro operativo (ADMIN)
+      parameters: [{ name: clave, in: path, required: true, schema: { type: string, example: UMBRAL_POR_VENCER_PCT } }]
+      requestBody:
+        content: { application/json: { schema: { type: object, required: [valor], properties: { valor: { type: string } } } } }
+      responses: { '200': { description: OK }, '422': { $ref: '#/components/responses/Validacion' } }
+
+  /api/usuarios:
+    get: { tags: [Usuarios], summary: Listar usuarios (ADMIN), responses: { '200': { description: OK } } }
+    post:
+      tags: [Usuarios]
+      summary: Crear usuario ADMIN o COORDINADOR
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nombre, email, password, rol]
+              properties:
+                nombre: { type: string }
+                email: { type: string }
+                password: { type: string }
+                rol: { type: string, enum: [ADMIN, COORDINADOR] }
+      responses: { '201': { description: Creado }, '409': { $ref: '#/components/responses/Conflicto' } }
+  /api/usuarios/{id}:
+    parameters: [{ $ref: '#/components/parameters/id' }]
+    get: { tags: [Usuarios], summary: Detalle, responses: { '200': { description: OK } } }
+    put: { tags: [Usuarios], summary: Actualizar nombre, correo o vigencia, responses: { '200': { description: OK } } }
+  /api/usuarios/{id}/reset-password:
+    post:
+      tags: [Usuarios]
+      summary: Restablecimiento controlado por el administrador
+      parameters: [{ $ref: '#/components/parameters/id' }]
+      requestBody:
+        content: { application/json: { schema: { type: object, required: [password], properties: { password: { type: string } } } } }
+      responses: { '204': { description: OK } }
+  /api/auditoria:
+    get:
+      tags: [Auditoría]
+      summary: Registro de auditoría general (ADMIN)
+      parameters:
+        - { $ref: '#/components/parameters/page' }
+        - { $ref: '#/components/parameters/limit' }
+        - { name: entidad, in: query, schema: { type: string } }
+        - { name: usuario_id, in: query, schema: { type: integer } }
+      responses: { '200': { description: OK } }
+
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+  parameters:
+    id: { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+    page: { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+    limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 10 } }
+  responses:
+    NoAutenticado:
+      description: Falta token, es inválido o la sesión fue cerrada
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' }, example: { error: { code: NO_AUTENTICADO, message: Autenticación requerida } } } }
+    Prohibido:
+      description: El rol no tiene permiso
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' }, example: { error: { code: PROHIBIDO, message: No tiene permisos para realizar esta operación } } } }
+    NoEncontrado:
+      description: No existe o no es accesible para el usuario
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' }, example: { error: { code: NO_ENCONTRADO, message: Solicitud no encontrado } } } }
+    Conflicto:
+      description: Duplicidad, integridad referencial o concurrencia
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' }, example: { error: { code: CONFLICTO, message: Ya existe un cliente con esa identificación } } } }
+    Validacion:
+      description: Datos de entrada inválidos
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: VALIDACION, message: Los datos enviados no son válidos, details: [{ campo: titulo, mensaje: Mínimo 5 caracteres }] } }
+    ReglaNegocio:
+      description: Se incumple una regla de negocio
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { error: { code: REGLA_NEGOCIO, message: 'Transición no permitida: REGISTRADA → RESUELTA' } }
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: {}
+    Meta:
+      type: object
+      properties:
+        page: { type: integer }
+        limit: { type: integer }
+        total: { type: integer }
+        totalPages: { type: integer }
+    Perfil:
+      type: object
+      properties:
+        id: { type: integer }
+        email: { type: string }
+        nombre: { type: string }
+        rol: { type: string, enum: [ADMIN, COORDINADOR, TECNICO, CLIENTE] }
+        clienteId: { type: integer, nullable: true }
+        tecnicoId: { type: integer, nullable: true }
+    Estado:
+      type: string
+      enum: [REGISTRADA, APROBADA, ASIGNADA, EN_PROCESO, PENDIENTE_INFO, RESUELTA, CERRADA, CANCELADA]
+    SolicitudNueva:
+      type: object
+      required: [sede_id, categoria_id, prioridad_id, titulo, descripcion, equipo_afectado]
+      properties:
+        cliente_id: { type: integer, description: Obligatorio para ADMIN/COORDINADOR; ignorado para CLIENTE }
+        sede_id: { type: integer }
+        categoria_id: { type: integer }
+        prioridad_id: { type: integer, description: Prioridad solicitada }
+        titulo: { type: string, minLength: 5, maxLength: 150 }
+        descripcion: { type: string, minLength: 10 }
+        equipo_afectado: { type: string }
+    Solicitud:
+      type: object
+      properties:
+        id: { type: integer }
+        codigo: { type: string, example: SOL-2026-000071 }
+        titulo: { type: string }
+        descripcion: { type: string }
+        equipo_afectado: { type: string }
+        cliente_id: { type: integer }
+        cliente_nombre: { type: string }
+        sede_nombre: { type: string }
+        categoria_nombre: { type: string }
+        prioridad: { type: string }
+        prioridad_solicitada: { type: string }
+        estado: { $ref: '#/components/schemas/Estado' }
+        tecnico_id: { type: integer, nullable: true }
+        tecnico_nombre: { type: string, nullable: true }
+        resolucion: { type: string, nullable: true }
+        fecha_limite: { type: string, format: date-time }
+        fecha_resolucion: { type: string, format: date-time, nullable: true }
+        fecha_cierre: { type: string, format: date-time, nullable: true }
+        estado_plazo: { type: string, enum: [A_TIEMPO, POR_VENCER, VENCIDA, CUMPLIDA, INCUMPLIDA, NO_APLICA] }
+        horas_restantes: { type: number }
+        version: { type: integer }
+        created_at: { type: string, format: date-time }
+    SolicitudDetalle:
+      allOf:
+        - { $ref: '#/components/schemas/Solicitud' }
+        - type: object
+          properties:
+            adjuntos: { type: array, items: { type: object } }
+            asignaciones: { type: array, items: { type: object } }
+            acciones:
+              type: object
+              properties:
+                transiciones: { type: array, items: { $ref: '#/components/schemas/Estado' } }
+                puedeAsignar: { type: boolean }
+                puedeReabrir: { type: boolean }
+                puedeComentar: { type: boolean }
+                puedeAdjuntar: { type: boolean }
+    Historial:
+      type: object
+      properties:
+        id: { type: integer }
+        accion: { type: string, enum: [CREACION, CAMBIO_ESTADO, ASIGNACION, REASIGNACION, COMENTARIO, REAPERTURA, ADJUNTO, CAMBIO_PRIORIDAD] }
+        estado_anterior: { type: string, nullable: true }
+        estado_nuevo: { type: string, nullable: true }
+        comentario: { type: string, nullable: true }
+        detalle: { type: object, nullable: true }
+        usuario_nombre: { type: string }
+        usuario_rol: { type: string }
+        fecha: { type: string, format: date-time }
+    Notificacion:
+      type: object
+      properties:
+        id: { type: integer }
+        tipo: { type: string }
+        titulo: { type: string }
+        mensaje: { type: string }
+        solicitud_id: { type: integer, nullable: true }
+        solicitud_codigo: { type: string, nullable: true }
+        leida: { type: boolean }
+        created_at: { type: string, format: date-time }
+    ClienteNuevo:
+      type: object
+      required: [identificacion, razon_social, email]
+      properties:
+        identificacion: { type: string, description: 'Cédula (10) o RUC (13, termina en 001) válidos' }
+        razon_social: { type: string }
+        email: { type: string }
+        telefono: { type: string }
+        direccion: { type: string }
+        sedes: { type: array, items: { type: object, properties: { nombre: { type: string }, direccion: { type: string } } } }
+        cuenta: { type: object, properties: { email: { type: string }, password: { type: string } } }
+    TecnicoNuevo:
+      type: object
+      required: [nombre, email, password, cedula, especialidades]
+      properties:
+        nombre: { type: string }
+        email: { type: string }
+        password: { type: string }
+        cedula: { type: string, description: Cédula ecuatoriana válida }
+        telefono: { type: string }
+        max_solicitudes_activas: { type: integer, minimum: 1, maximum: 50 }
+        especialidades: { type: array, items: { type: integer } }
+    Indicadores:
+      type: object
+      properties:
+        filtros: { type: object }
+        resumen: { type: object, properties: { total: { type: integer }, abiertas: { type: integer }, resueltas: { type: integer }, cerradas: { type: integer }, canceladas: { type: integer } } }
+        porEstado: { type: array, items: { type: object, properties: { codigo: { type: string }, nombre: { type: string }, total: { type: integer } } } }
+        porPrioridad: { type: array, items: { type: object } }
+        cargaPorTecnico: { type: array, items: { type: object, properties: { nombre: { type: string }, activas: { type: integer }, maximo: { type: integer }, resueltas: { type: integer } } } }
+        tiempoResolucion: { type: object, properties: { global: { type: number, nullable: true }, porPrioridad: { type: array, items: { type: object } } } }
+        cumplimiento: { type: object, properties: { aTiempo: { type: integer }, fueraDePlazo: { type: integer }, porcentaje: { type: number, nullable: true } } }
+        vencimientos: { type: object, properties: { vencidas: { type: integer }, por_vencer: { type: integer }, abiertas: { type: integer } } }
+        evolucion: { type: array, items: { type: object, properties: { fecha: { type: string }, creadas: { type: integer }, resueltas: { type: integer } } } }

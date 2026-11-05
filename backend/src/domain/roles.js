@@ -1,0 +1,10 @@
+const ROLES = Object.freeze({
+  ADMIN: 'ADMIN',
+  COORDINADOR: 'COORDINADOR',
+  TECNICO: 'TECNICO',
+  CLIENTE: 'CLIENTE',
+});
+
+const GESTION = [ROLES.ADMIN, ROLES.COORDINADOR];
+
+module.exports = { ROLES, GESTION };
