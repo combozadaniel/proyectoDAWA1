@@ -14,7 +14,7 @@ async function buscarPorEmail(email) {
 async function buscarContextoUsuario(id) {
   const { rows } = await query(
     `SELECT u.id, u.email, u.nombre, u.activo, r.codigo AS rol,
-            c.id AS cliente_id, t.id AS tecnico_id
+            c.id AS cliente_id, t.id AS tecnico_id, t.disponible AS tecnico_disponible
        FROM usuarios u
        JOIN roles r ON r.id = u.rol_id
        LEFT JOIN clientes c ON c.usuario_id = u.id

@@ -1,0 +1,132 @@
+:root {
+  --sg-sidebar: 230px;
+}
+
+body {
+  background: var(--bs-tertiary-bg);
+}
+
+.app-shell {
+  min-height: 100vh;
+}
+
+.min-w-0 {
+  min-width: 0;
+}
+
+.sidebar {
+  width: var(--sg-sidebar);
+  min-height: calc(100vh - 56px);
+  position: sticky;
+  top: 56px;
+  align-self: flex-start;
+}
+
+.sidebar-link {
+  color: var(--bs-body-color);
+  border-radius: 0.375rem;
+  padding: 0.5rem 0.75rem;
+}
+
+.sidebar-link:hover {
+  background: var(--bs-secondary-bg);
+}
+
+.sidebar-link.active {
+  background: var(--bs-primary-bg-subtle);
+  color: var(--bs-primary-text-emphasis);
+  font-weight: 600;
+}
+
+.skip-link {
+  position: absolute;
+  z-index: 2000;
+  padding: 0.5rem 1rem;
+  background: #fff;
+}
+
+.bg-pending {
+  background-color: #6f42c1 !important;
+}
+
+.estado-badge {
+  font-weight: 500;
+}
+
+.kpi .valor {
+  font-size: 1.75rem;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.card-titulo {
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.timeline {
+  list-style: none;
+  padding-left: 0;
+  border-left: 2px solid var(--bs-border-color);
+  margin-left: 0.5rem;
+}
+
+.timeline li {
+  position: relative;
+  padding: 0 0 1rem 1.25rem;
+}
+
+.timeline li::before {
+  content: '';
+  position: absolute;
+  left: -7px;
+  top: 0.35rem;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--bs-primary);
+  border: 2px solid var(--bs-body-bg);
+}
+
+.tabla-solicitudes td,
+.tabla-solicitudes th {
+  vertical-align: middle;
+}
+
+.fila-click {
+  cursor: pointer;
+}
+
+.login-bg {
+  min-height: 100vh;
+  background: linear-gradient(135deg, #0b5ed7 0%, #0a3f8f 100%);
+}
+
+/* En móviles, las tablas se presentan como tarjetas apiladas */
+@media (max-width: 767.98px) {
+  .tabla-responsiva thead {
+    display: none;
+  }
+  .tabla-responsiva tr {
+    display: block;
+    border: 1px solid var(--bs-border-color);
+    border-radius: 0.5rem;
+    margin-bottom: 0.75rem;
+    padding: 0.5rem;
+    background: var(--bs-body-bg);
+  }
+  .tabla-responsiva td {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    border: 0;
+    padding: 0.25rem 0.25rem;
+    text-align: right;
+  }
+  .tabla-responsiva td::before {
+    content: attr(data-label);
+    font-weight: 600;
+    text-align: left;
+    color: var(--bs-secondary-color);
+  }
+}

@@ -63,6 +63,7 @@ function perfilPublico(u) {
     rol: u.rol,
     clienteId: u.cliente_id,
     tecnicoId: u.tecnico_id,
+    tecnicoDisponible: u.tecnico_disponible ?? null,
   };
 }
 

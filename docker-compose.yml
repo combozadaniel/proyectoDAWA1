@@ -1,0 +1,49 @@
+# Despliegue completo: PostgreSQL + API (Node/Express) + Frontend (React servido por Nginx)
+#   cp .env.example .env   (y cambiar los secretos)
+#   docker compose up -d --build
+#   Abrir http://localhost:8080   ·   API docs: http://localhost:8080/api/docs
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: servigest
+      POSTGRES_USER: ${POSTGRES_USER:-servigest}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD en .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d servigest"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATABASE_URL: postgres://${POSTGRES_USER:-servigest}:${POSTGRES_PASSWORD}@db:5432/servigest
+      JWT_SECRET: ${JWT_SECRET:?Defina JWT_SECRET en .env (mínimo 32 caracteres)}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-8h}
+      CORS_ORIGIN: ${PUBLIC_URL:-http://localhost:8080}
+      FRONTEND_URL: ${PUBLIC_URL:-http://localhost:8080}
+      SEED_DEMO: ${SEED_DEMO:-true}
+    volumes:
+      - uploads:/app/uploads
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+
+volumes:
+  pgdata:
+  uploads:
